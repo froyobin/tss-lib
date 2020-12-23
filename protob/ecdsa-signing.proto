@@ -6,7 +6,7 @@
 
 syntax = "proto3";
 
-option go_package = "ecdsa/signing";
+option go_package = "github.com/binance-chain/tss-lib/ecdsa/keygen";
 
 /*
  * Represents a P2P message sent to each party during Phase 1 of the GG20 ECDSA TSS signing protocol.

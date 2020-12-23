@@ -6,7 +6,7 @@
 
 syntax = "proto3";
 
-option go_package = "ecdsa/resharing";
+option go_package = "github.com/binance-chain/tss-lib/ecdsa/keygen";
 
 /*
  * The Round 1 data is broadcast to peers of the New Committee in this message.

@@ -6,7 +6,7 @@
 
 syntax = "proto3";
 
-option go_package = "eddsa/signing";
+option go_package = "github.com/binance-chain/tss-lib/eddsa/signing";
 
 /*
  * Represents a BROADCAST message sent to all parties during Round 1 of the EDDSA TSS signing protocol.

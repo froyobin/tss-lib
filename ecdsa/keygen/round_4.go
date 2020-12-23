@@ -8,11 +8,53 @@ package keygen
 
 import (
 	"errors"
+	"math/big"
+	"sync"
 
 	"github.com/binance-chain/tss-lib/common"
-	"github.com/binance-chain/tss-lib/crypto/paillier"
 	"github.com/binance-chain/tss-lib/tss"
 )
+
+func (round *round4) findCulprits(j int, abortItems []*KGRound3Message_AbortDataEntry) []int {
+	var culprintsIndex []int
+	reporterPubKey := round.save.PaillierPKs[j]
+	for _, el := range abortItems {
+		shareOwnerValue := round.temp.recvEncryptedShares[el.Index]
+		// if share is nil,we need to verify whether the share own send an invalid share
+		if el.ShareX == nil || el.ShareM == nil {
+			NSq := reporterPubKey.NSquare()
+			c := new(big.Int).SetBytes(shareOwnerValue[j])
+			if c.Cmp(zero) == -1 || c.Cmp(NSq) != -1 { // c < 0 || c >= N2 ?
+				culprintsIndex = append(culprintsIndex, int(el.Index))
+				continue
+			} else {
+				culprintsIndex = append(culprintsIndex, j)
+				continue
+			}
+		}
+		m := new(big.Int).SetBytes(el.ShareM)
+		r := new(big.Int).SetBytes(el.ShareX)
+		// the reported value from the "victim"
+		reportedValue, _, err := reporterPubKey.EncryptWithChosenRandomness(m, r)
+		if err != nil {
+			culprintsIndex = append(culprintsIndex, j)
+			continue
+		}
+		// this indicate the share owner is the malicious node
+		if reportedValue.Cmp(new(big.Int).SetBytes(shareOwnerValue[j])) == 0 {
+			culprintsIndex = append(culprintsIndex, int(el.Index))
+			continue
+		} else {
+			culprintsIndex = append(culprintsIndex, j)
+			continue
+		}
+	}
+	// this indicate the one who claim the incorrect VSS should be blamed.
+	if len(culprintsIndex) == 0 {
+		culprintsIndex = append(culprintsIndex, j)
+	}
+	return culprintsIndex
+}
 
 func (round *round4) Start() *tss.Error {
 	if round.started {
@@ -21,34 +63,68 @@ func (round *round4) Start() *tss.Error {
 	round.number = 4
 	round.started = true
 	round.resetOK()
-
+	r3msgs := round.temp.kgRound3Messages
+	identyfyAbort := false
+	chs := make([]chan bool, len(r3msgs))
+	// r4 messages are assumed to be available and != nil in this function
+	for i := range chs {
+		chs[i] = make(chan bool)
+	}
 	i := round.PartyID().Index
 	Ps := round.Parties().IDs()
 	PIDs := Ps.Keys()
 	ecdsaPub := round.save.ECDSAPub
+	var identifyingAbortCulprits []*tss.PartyID
+	var identifyingAbortCulpritsLock sync.Mutex
+	if round.vssAbort {
+		identyfyAbort = true
+		identifyingAbortCulpritsLock.Lock()
+		for _, el := range round.temp.vssAbortData.Item {
+			identifyingAbortCulprits = append(identifyingAbortCulprits, Ps[el.Index])
+		}
+		identifyingAbortCulpritsLock.Unlock()
+	}
 
 	// 1-3. (concurrent)
-	// r3 messages are assumed to be available and != nil in this function
-	r3msgs := round.temp.kgRound3Messages
-	chs := make([]chan bool, len(r3msgs))
-	for i := range chs {
-		chs[i] = make(chan bool)
-	}
 	for j, msg := range round.temp.kgRound3Messages {
 		if j == i {
 			continue
 		}
 		r3msg := msg.Content().(*KGRound3Message)
-		go func(prf paillier.Proof, j int, ch chan<- bool) {
-			ppk := round.save.PaillierPKs[j]
-			ok, err := prf.Verify(ppk.N, PIDs[j], ecdsaPub)
-			if err != nil {
-				common.Logger.Error(round.WrapError(err, Ps[j]).Error())
+		go func(r3msg *KGRound3Message, j int, ch chan<- bool) {
+			switch c := r3msg.GetContent().(type) {
+			case *KGRound3Message_Abort:
+				identyfyAbort = true
+				culpritIndex := round.findCulprits(j, c.Abort.GetItem())
+				identifyingAbortCulpritsLock.Lock()
+				for _, el := range culpritIndex {
+					identifyingAbortCulprits = append(identifyingAbortCulprits, Ps[el])
+				}
+				identifyingAbortCulpritsLock.Unlock()
 				ch <- false
-				return
+
+			case *KGRound3Message_Success:
+				if !round.vssAbort {
+					ppk := round.save.PaillierPKs[j]
+					prf := r3msg.UnmarshalProofInts()
+					ok, err := prf.Verify(ppk.N, PIDs[j], ecdsaPub)
+					if err != nil {
+						common.Logger.Error(round.WrapError(err, Ps[j]).Error())
+						ch <- false
+						return
+						return
+					}
+					ch <- ok
+					return
+				}
+				ch <- true
+			default:
+				common.Logger.Error(round.WrapError(errors.New("unknown message type"), Ps[j]).Error())
+				ch <- false
+
 			}
-			ch <- ok
-		}(r3msg.UnmarshalProofInts(), j, chs[j])
+		}(r3msg, j, chs[j])
+
 	}
 
 	// consume unbuffered channels (end the goroutines)
@@ -58,6 +134,11 @@ func (round *round4) Start() *tss.Error {
 			continue
 		}
 		round.ok[j] = <-ch
+	}
+	// if we have any identifying abort message, we enter identifying abort and will not continue the tss.
+	if identyfyAbort {
+		common.Logger.Errorf("vss verify faild with culprits %v", identifyingAbortCulprits)
+		return round.WrapError(errors.New("vss verify failed"), identifyingAbortCulprits...)
 	}
 	culprits := make([]*tss.PartyID, 0, len(Ps)) // who caused the error(s)
 	for j, ok := range round.ok {
