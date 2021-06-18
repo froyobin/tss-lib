@@ -181,12 +181,20 @@ func (round *finalization) Start() *tss.Error {
 	if round.abortingT7 {
 		common.Logger.Infof("round 8: Abort Type 7 code path triggered")
 		q := tss.EC().Params().N
+
 		kIs := make([][]byte, len(Ps))
+		allK := big.NewInt(0)
 		gMus := make([][]*crypto.ECPoint, len(Ps))
+		allMus := make([][]*big.Int, len(Ps))
+		sumMu := big.NewInt(0)
+		var gSumMu *crypto.ECPoint
 		gNus := make([][]*crypto.ECPoint, len(Ps))
 		gSigmaIPfs := make([]*zkp.ECDDHProof, len(Ps))
 		for i := range gMus {
 			gMus[i] = make([]*crypto.ECPoint, len(Ps))
+		}
+		for i := range allMus {
+			allMus[i] = make([]*big.Int, len(Ps))
 		}
 		for j := range gNus {
 			gNus[j] = make([]*crypto.ECPoint, len(Ps))
@@ -212,6 +220,7 @@ func (round *finalization) Start() *tss.Error {
 
 			// keep k_i and the g^sigma_i proof for later
 			kIs[j] = r7msg.GetKI()
+			allK = q.Add(allK, new(big.Int).SetBytes(r7msg.GetKI()))
 			if gSigmaIPfs[j], err = r7msg.UnmarshalSigmaIProof(); err != nil {
 				culprits = append(culprits, Pj)
 				continue
@@ -250,7 +259,9 @@ func (round *finalization) Start() *tss.Error {
 				if k == j {
 					continue
 				}
+				crypto.ScalarBaseMult(tss.EC(), mu.Mod(mu, q))
 				gMus[j][k] = crypto.ScalarBaseMult(tss.EC(), mu.Mod(mu, q))
+				allMus[j][k] = mu.Mod(mu, q)
 			}
 		}
 		bigR := round.temp.rI
@@ -265,8 +276,28 @@ func (round *finalization) Start() *tss.Error {
 				}
 				gWJKI := round.temp.bigWs[j].ScalarMultBytes(kIs[i])
 				gNus[i][j], _ = gWJKI.Sub(gMus[i][j])
+				tmp := q.Sub(allMus[i][j], allMus[j][i])
+				sumMu = q.Add(sumMu, tmp)
 			}
 		}
+
+		for i := range Ps {
+			for j := range Ps {
+				if j == i {
+					continue
+				}
+				tmp := q.Sub(allMus[i][j], allMus[j][i])
+				sumMu = q.Add(sumMu, tmp)
+			}
+		}
+
+		gSumMu = crypto.ScalarBaseMult(tss.EC(), sumMu)
+		// calcualte W^k
+		for i, _ := range Ps {
+			gSigmaI2 := round.temp.bigWs[i].ScalarMultBytes(allK.Bytes())
+			gSigmaI2, _ = gSigmaI2.Add(gSumMu)
+		}
+
 		// compute g^sigma_i's
 		for i, P := range Ps {
 			gWIMulKi := round.temp.bigWs[i].ScalarMultBytes(kIs[i])
@@ -280,6 +311,10 @@ func (round *finalization) Start() *tss.Error {
 				gSigmaI, _ = gSigmaI.Add(gMuIJ)
 				gSigmaI, _ = gSigmaI.Add(gNuJI)
 			}
+
+			gSigmaI2 := round.temp.bigWs[i].ScalarMultBytes(allK.Bytes())
+			gSigmaI2, _ = gSigmaI2.Add(gSumMu)
+			fmt.Printf(">>>>>>>>>>>#####%v\n", gSigmaI2.Equals(gSigmaI))
 			bigSI, _ := crypto.NewECPointFromProtobuf(round.temp.BigSJ[P.Id])
 			if !gSigmaIPfs[i].VerifySigmaI(tss.EC(), gSigmaI, bigR, bigSI) {
 				culprits = append(culprits, P)

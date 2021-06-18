@@ -159,6 +159,9 @@ func (round *round7) Start() *tss.Error {
 
 	round.temp.rI = bigR
 	round.temp.BigSJ = bigSJ
+	if i == 0 {
+
+	}
 	if y := round.key.ECDSAPub; !bigSJProducts.Equals(y) {
 		round.abortingT7 = true
 		common.Logger.Warnf("round 7: consistency check failed: y != bigSJ products, entering Type 7 identified abort")
